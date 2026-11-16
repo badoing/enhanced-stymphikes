@@ -1,0 +1,17 @@
+.gradle
+build
+.idea/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+*.class
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
+
+# AI coding guidelines (kept locally, not published)
+AGENTS.md
+CLAUDE.md
