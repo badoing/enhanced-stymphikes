@@ -1,6 +1,7 @@
 package com.stymphiketreehighlighter;
 
 import com.google.inject.Provides;
+import java.awt.event.KeyEvent;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -13,9 +14,11 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
+import net.runelite.api.HitsplatID;
 import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.ObjectComposition;
+import net.runelite.api.Player;
 import net.runelite.api.Scene;
 import net.runelite.api.Skill;
 import net.runelite.api.Tile;
@@ -25,14 +28,20 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.gameval.AnimationID;
+import net.runelite.api.gameval.NpcID;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.input.KeyListener;
+import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -53,7 +62,7 @@ import net.runelite.client.util.Text;
         description = "Highlights Stymphike trees and hiding bushes through the hunting cycle, with a timer while you hide.",
         tags = {"hunter", "stymphike", "vampyrium", "highlight", "trap", "timer"}
 )
-public class StymphikeTreeHighlighterPlugin extends Plugin
+public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListener
 {
     /** Stymphike tree and its variants. */
     private static final Set<Integer> TREE_IDS = Set.of(
@@ -72,6 +81,30 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
             ObjectID.HUNTING_STYMPHIKE_BUSH_EMPTY,
             ObjectID.HUNTING_STYMPHIKE_BUSH_HIDDEN
     );
+
+    /** While hidden, the player rustles every 15 ticks (9 seconds); the automatic spear happens on a rustle. */
+    private static final int RUSTLE_INTERVAL_TICKS = 15;
+
+    /** How long the red flash keeps pulsing after the last hit taken. */
+    private static final long HIT_FLASH_MS = 5_000;
+
+    /** Normal damage and zero-damage (block) hitsplats; excludes poison, venom, disease, heals etc. */
+    private static final Set<Integer> ATTACK_HITSPLATS = Set.of(
+            HitsplatID.DAMAGE_ME,
+            HitsplatID.DAMAGE_OTHER,
+            HitsplatID.BLOCK_ME,
+            HitsplatID.BLOCK_OTHER,
+            HitsplatID.DAMAGE_MAX_ME
+    );
+
+    /** How many ticks late a rustle can arrive before it is treated as missed. */
+    private static final int RUSTLE_LATE_TICKS = 3;
+
+    /** The spear lands about 1-3 ticks after the rustle that triggers it; predict the middle. */
+    private static final int SPEAR_DELAY_TICKS = 2;
+
+    /** How long after a post-landing rustle to keep showing "Spearing!" before predicting the next rustle. */
+    private static final int SPEARING_SLACK_TICKS = 4;
 
     /** How long the hiding timer and dark screen last. */
     private static final long HIDE_DURATION_MS = 38_000;
@@ -95,6 +128,9 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
     private OverlayManager overlayManager;
 
     @Inject
+    private KeyManager keyManager;
+
+    @Inject
     private StymphikeTreeOverlay overlay;
 
     @Inject
@@ -102,6 +138,12 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
 
     @Inject
     private StymphikeStatsOverlay statsOverlay;
+
+    @Inject
+    private StymphikeLeftBushOverlay leftBushOverlay;
+
+    @Inject
+    private StymphikeAttackOverlay attackOverlay;
 
     /** Every Stymphike tree in the scene. */
     @Getter
@@ -123,11 +165,45 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
 
     /** True while the player is actually hidden in a bush, until the Stymphike is speared. */
     @Getter
-    private boolean hiding;
+    private volatile boolean hiding;
 
     /** The bush the player chose to hide in, used to place the timer if no tree was baited. */
     @Getter
     private WorldPoint hideBush;
+
+    /**
+     * True once the player has closed the dark screen for the current hide. Set from the key
+     * listener (AWT thread) and read by the overlay (client thread), hence volatile.
+     */
+    @Getter
+    private volatile boolean darkScreenClosed;
+
+    /** Exact tile the player is hiding on, captured on the first game tick after hiding starts. */
+    private WorldPoint hiddenAt;
+
+    /** Game ticks since the plugin started, used to time rustles. */
+    private int tickCount;
+
+    /** Tick of the player's last settle-in or rustle animation, or -1. */
+    private int lastRustleTick = -1;
+
+    /** True once the Stymphike has landed at the baited tree, until it is speared or flies off. */
+    @Getter
+    private boolean stymphikeLanded;
+
+    /** When the player last took a hit while hunting (System.currentTimeMillis), or 0. */
+    private long lastHitMs;
+
+    /** Tick the Stymphike landed on. */
+    private int landedTick;
+
+    /** True if the player left the bush and went back in during this cycle (auto-spear may be delayed). */
+    @Getter
+    private boolean reenteredBush;
+
+    /** True after walking out of the bush before the Stymphike was speared; shows the warning pop-up. */
+    @Getter
+    private boolean leftBush;
 
     /** When hiding started (System.currentTimeMillis), or 0 if no timer is running. */
     private long hideStartMs;
@@ -160,6 +236,9 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         overlayManager.add(overlay);
         overlayManager.add(hidingOverlay);
         overlayManager.add(statsOverlay);
+        overlayManager.add(leftBushOverlay);
+        overlayManager.add(attackOverlay);
+        keyManager.registerKeyListener(this);
         // Pick up trees and bushes that were already loaded when the plugin was turned on
         clientThread.invoke(this::scanLoadedScene);
     }
@@ -170,6 +249,9 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         overlayManager.remove(overlay);
         overlayManager.remove(hidingOverlay);
         overlayManager.remove(statsOverlay);
+        overlayManager.remove(leftBushOverlay);
+        overlayManager.remove(attackOverlay);
+        keyManager.unregisterKeyListener(this);
         resetCycle();
         resetStats();
     }
@@ -232,6 +314,11 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         pendingBaitTree = null;
         activeTree = null;
         hideBush = null;
+        leftBush = false;
+        stymphikeLanded = false;
+        reenteredBush = false;
+        lastRustleTick = -1;
+        lastHitMs = 0;
         stopHiding();
     }
 
@@ -340,6 +427,7 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
             baitedTrees.add(pendingBaitTree);
             activeTree = pendingBaitTree;
             pendingBaitTree = null;
+            leftBush = false;
             stopHiding();
             log.debug("Stymphike tree baited at {}", activeTree);
         }
@@ -357,12 +445,14 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         int anim = actor.getAnimation();
         if (anim == AnimationID.HUMAN_STYMPHIKE_IDLE_START || anim == AnimationID.HUMAN_STYMPHIKE_RUSTLE)
         {
-            // Settling into the bush (or rustling while waiting, if the start was missed)
+            // Settling in or rustling: the auto-spear happens on a rustle, and rustles repeat every
+            // RUSTLE_INTERVAL_TICKS from here, so remember when this one was
+            lastRustleTick = tickCount;
             startHiding();
         }
-        else if (anim == AnimationID.HUMAN_STAKE2 && hiding)
+        else if (anim == AnimationID.HUMAN_STAKE2 && isWaitingForStymphike())
         {
-            // Spear thrust from the bush
+            // Spear thrust, from the bush or manually after leaving it
             log.debug("Stymphike speared");
             markStatsActivity();
             spearCount++;
@@ -371,9 +461,41 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
     }
 
     @Subscribe
+    public void onHitsplatApplied(HitsplatApplied event)
+    {
+        // Only while Stymphike hunting (trees in view), and only for normal hits/blocks on the player
+        if (!config.flashWhenHit()
+                || event.getActor() != client.getLocalPlayer()
+                || trees.isEmpty()
+                || !ATTACK_HITSPLATS.contains(event.getHitsplat().getHitsplatType()))
+        {
+            return;
+        }
+        lastHitMs = System.currentTimeMillis();
+        log.debug("Hit while hunting ({} damage), flashing red", event.getHitsplat().getAmount());
+    }
+
+    /** True for a few seconds after the player was hit while hunting; drives the red flash. */
+    public boolean isRecentlyHit()
+    {
+        return lastHitMs != 0 && System.currentTimeMillis() - lastHitMs < HIT_FLASH_MS;
+    }
+
+    @Subscribe
+    public void onNpcSpawned(NpcSpawned event)
+    {
+        if (isWaitingForStymphike() && event.getNpc().getId() == NpcID.HUNTING_STYMPHIKE)
+        {
+            stymphikeLanded = true;
+            landedTick = tickCount;
+            log.debug("Stymphike landed");
+        }
+    }
+
+    @Subscribe
     public void onNpcDespawned(NpcDespawned event)
     {
-        if (!hiding)
+        if (!isWaitingForStymphike())
         {
             return;
         }
@@ -387,15 +509,115 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         }
     }
 
+    @Subscribe
+    public void onGameTick(GameTick event)
+    {
+        tickCount++;
+        if (!hiding)
+        {
+            return;
+        }
+
+        Player player = client.getLocalPlayer();
+        if (player == null)
+        {
+            return;
+        }
+
+        WorldPoint location = player.getWorldLocation();
+        if (hiddenAt == null)
+        {
+            // First tick in the bush: remember exactly where the player is hiding
+            hiddenAt = location;
+        }
+        else if (!location.equals(hiddenAt))
+        {
+            // Any movement, even one tile, leaves the bush: the Stymphike flies off unless speared manually
+            log.debug("Left the bush, moved from {} to {}", hiddenAt, location);
+            // Dark screen goes, but keep hideStartMs: the Stymphike still arrives on the same countdown
+            hiding = false;
+            hiddenAt = null;
+            darkScreenClosed = false;
+            leftBush = true;
+        }
+    }
+
     private void startHiding()
     {
+        // Re-entering after leaving: carry on the same countdown, as the Stymphike's arrival hasn't changed.
+        // Being back in the bush restores the auto-spear (on the next rustle), so the warning can go.
+        boolean resumeCountdown = leftBush && hideStartMs != 0;
+        leftBush = false;
         if (hiding)
         {
             return;
         }
         hiding = true;
-        hideStartMs = System.currentTimeMillis();
-        log.debug("Hidden in bush, timer started");
+        darkScreenClosed = false;
+        if (resumeCountdown)
+        {
+            // Rustle timing restarted, so the auto-spear may now be delayed: show its prediction
+            reenteredBush = true;
+        }
+        else
+        {
+            hideStartMs = System.currentTimeMillis();
+            reenteredBush = false;
+        }
+        log.debug(resumeCountdown ? "Back in bush, countdown continues" : "Hidden in bush, timer started");
+    }
+
+    /**
+     * Seconds until the automatic spear, once the Stymphike has landed and the player is in the bush,
+     * or -1 if not applicable. The spear follows the player's next rustle, one tick later.
+     */
+    public int getAutoSpearSeconds()
+    {
+        if (!hiding || !stymphikeLanded || lastRustleTick < 0)
+        {
+            return -1;
+        }
+        int ticksSinceRustle = tickCount - lastRustleTick;
+        // A rustle since landing means the spear is moments away: report 0 rather than the following rustle
+        // (allow some slack, then fall back to predicting the next rustle)
+        if (lastRustleTick >= landedTick && ticksSinceRustle <= SPEARING_SLACK_TICKS)
+        {
+            return 0;
+        }
+        int ticksToRustle;
+        if (ticksSinceRustle <= RUSTLE_INTERVAL_TICKS + RUSTLE_LATE_TICKS)
+        {
+            // Next rustle is due (or a tick or two late): don't wrap round to the one after it
+            ticksToRustle = Math.max(0, RUSTLE_INTERVAL_TICKS - ticksSinceRustle);
+        }
+        else
+        {
+            // A rustle was missed entirely; fall back to the regular schedule
+            ticksToRustle = RUSTLE_INTERVAL_TICKS - (ticksSinceRustle % RUSTLE_INTERVAL_TICKS);
+        }
+        int ticksToSpear = ticksToRustle + SPEAR_DELAY_TICKS;
+        return (int) Math.ceil(ticksToSpear * 0.6);
+    }
+
+    @Override
+    public void keyPressed(KeyEvent e)
+    {
+        // Only take the key while the dark screen is actually showing; otherwise the game gets it as normal
+        if (hiding && !darkScreenClosed && config.closeDarkScreenKey().matches(e))
+        {
+            darkScreenClosed = true;
+            e.consume();
+        }
+    }
+
+    @Override
+    public void keyTyped(KeyEvent e)
+    {
+    }
+
+    @Override
+    public void keyReleased(KeyEvent e)
+    {
     }
 
     /** Stymphike speared (or gone): stop hiding, and the tree is unbaited again. */
@@ -405,21 +627,33 @@ public class StymphikeTreeHighlighterPlugin extends Plugin
         {
             baitedTrees.remove(activeTree);
         }
+        leftBush = false;
+        stymphikeLanded = false;
+        reenteredBush = false;
         stopHiding();
+    }
+
+    /** True while a Stymphike is on its way: hidden in the bush, or left it with the countdown still active. */
+    private boolean isWaitingForStymphike()
+    {
+        return hiding || (leftBush && hideStartMs != 0);
     }
 
     private void stopHiding()
     {
         hiding = false;
+        hiddenAt = null;
+        darkScreenClosed = false;
         hideStartMs = 0;
     }
 
     /**
-     * Seconds left on the hiding timer, rounded up, or -1 if there is no running timer.
+     * Seconds left until the Stymphike arrives, rounded up, or -1 if there is no running countdown.
+     * Keeps running after leaving the bush, since the Stymphike still arrives on schedule.
      */
     public int getTimerSecondsRemaining()
     {
-        if (!hiding || hideStartMs == 0)
+        if ((!hiding && !leftBush) || hideStartMs == 0)
         {
             return -1;
         }

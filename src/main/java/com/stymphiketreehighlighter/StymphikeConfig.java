@@ -1,10 +1,12 @@
 package com.stymphiketreehighlighter;
 
 import java.awt.Color;
+import java.awt.event.KeyEvent;
 import net.runelite.client.config.Alpha;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.config.Range;
 
 @ConfigGroup("stymphiketreehighlighter")
@@ -150,12 +152,56 @@ public interface StymphikeConfig extends Config
     }
 
     @ConfigItem(
+            keyName = "undarkenChatBox",
+            name = "Undarken Chat Box",
+            description = "Keep the chat box bright while the rest of the screen is darkened.",
+            position = 13
+    )
+    default boolean undarkenChatBox()
+    {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "flashWhenHit",
+            name = "Flash Red When Hit",
+            description = "Flash the screen red for a few seconds if you take a hit while Stymphike hunting.",
+            position = 17
+    )
+    default boolean flashWhenHit()
+    {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "closeDarkScreenKey",
+            name = "Close Dark Screen Key",
+            description = "Press this key while hiding to close the dark screen. The timer keeps running.",
+            position = 14
+    )
+    default Keybind closeDarkScreenKey()
+    {
+        return new Keybind(KeyEvent.VK_ESCAPE, 0);
+    }
+
+    @ConfigItem(
             keyName = "showStats",
             name = "Show Stats Box",
             description = "Show Stymphikes speared and Hunter XP, with hourly rates, in the top left.",
-            position = 13
+            position = 15
     )
     default boolean showStats()
+    {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showLeftBushWarning",
+            name = "Left Bush Warning",
+            description = "Show a pop-up if you leave the bush before the Stymphike is speared.",
+            position = 16
+    )
+    default boolean showLeftBushWarning()
     {
         return true;
     }
