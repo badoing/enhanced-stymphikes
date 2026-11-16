@@ -1,4 +1,4 @@
-# Stymphike Tree Highlighter
+# Enhanced Stymphikes
 
 A RuneLite plugin for Stymphike hunting in Vampyrium. It highlights each step of the hunting cycle so you always know what to click next.
 

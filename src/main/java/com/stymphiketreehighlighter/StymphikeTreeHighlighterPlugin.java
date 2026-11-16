@@ -49,7 +49,7 @@ import net.runelite.client.util.Text;
  */
 @Slf4j
 @PluginDescriptor(
-        name = "Stymphike Tree Highlighter",
+        name = "Enhanced Stymphikes",
         description = "Highlights Stymphike trees and hiding bushes through the hunting cycle, with a timer while you hide.",
         tags = {"hunter", "stymphike", "vampyrium", "highlight", "trap", "timer"}
 )
