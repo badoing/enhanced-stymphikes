@@ -197,6 +197,12 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     /** Tick the Stymphike landed on. */
     private int landedTick;
 
+    /**
+     * The Stymphike that landed during the current cycle, or null. Only its despawn ends the cycle, so the
+     * previous (already speared) Stymphike despawning late doesn't cancel a hide that has just started.
+     */
+    private NPC landedStymphike;
+
     /** True if the player left the bush and went back in during this cycle (auto-spear may be delayed). */
     @Getter
     private boolean reenteredBush;
@@ -316,6 +322,7 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
         hideBush = null;
         leftBush = false;
         stymphikeLanded = false;
+        landedStymphike = null;
         reenteredBush = false;
         lastRustleTick = -1;
         lastHitMs = 0;
@@ -487,6 +494,7 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
         if (isWaitingForStymphike() && event.getNpc().getId() == NpcID.HUNTING_STYMPHIKE)
         {
             stymphikeLanded = true;
+            landedStymphike = event.getNpc();
             landedTick = tickCount;
             log.debug("Stymphike landed");
         }
@@ -495,18 +503,15 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     @Subscribe
     public void onNpcDespawned(NpcDespawned event)
     {
-        if (!isWaitingForStymphike())
+        // Only the Stymphike that landed this cycle counts; the previous one can despawn after
+        // the player has already re-baited and hidden again
+        if (!isWaitingForStymphike() || landedStymphike == null || event.getNpc() != landedStymphike)
         {
             return;
         }
 
-        NPC npc = event.getNpc();
-        String name = npc.getName();
-        if (name != null && Text.removeTags(name).toLowerCase().contains("stymphike"))
-        {
-            log.debug("Stymphike despawned while hiding");
-            completeCycle();
-        }
+        log.debug("Stymphike despawned while hiding");
+        completeCycle();
     }
 
     @Subscribe
@@ -629,6 +634,7 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
         }
         leftBush = false;
         stymphikeLanded = false;
+        landedStymphike = null;
         reenteredBush = false;
         stopHiding();
     }
