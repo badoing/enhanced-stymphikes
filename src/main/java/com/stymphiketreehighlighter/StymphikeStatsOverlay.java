@@ -51,8 +51,8 @@ public class StymphikeStatsOverlay extends OverlayPanel
     @Override
     public Dimension render(Graphics2D graphics)
     {
-        // Only pop up once there is something to show
-        if (!config.showStats() || !plugin.hasStatsSession())
+        // Only pop up once there is something to show, and only in the hunting area (Stymphike trees loaded)
+        if (!config.showStats() || !plugin.hasStatsSession() || plugin.getTrees().isEmpty())
         {
             return null;
         }

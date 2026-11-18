@@ -187,7 +187,7 @@ public interface StymphikeConfig extends Config
     @ConfigItem(
             keyName = "showStats",
             name = "Show Stats Box",
-            description = "Show Stymphikes speared and Hunter XP, with hourly rates, in the top left.",
+            description = "Show Stymphikes speared and Hunter XP, with hourly rates, in the top left while in the hunting area.",
             position = 15
     )
     default boolean showStats()
