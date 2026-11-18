@@ -205,4 +205,27 @@ public interface StymphikeConfig extends Config
     {
         return true;
     }
+
+    @ConfigItem(
+            keyName = "showSpearsToGoal",
+            name = "Show Stymphikes To Goal",
+            description = "Show in the stats box how many more Stymphikes you need to spear to reach your goal level, based on the XP of your last bait-to-spear cycle.",
+            position = 18
+    )
+    default boolean showSpearsToGoal()
+    {
+        return true;
+    }
+
+    @Range(min = 0, max = 99)
+    @ConfigItem(
+            keyName = "goalLevel",
+            name = "Goal Level",
+            description = "Hunter level to count Stymphikes towards. 0 (or a level you already have) uses your in-game XP drops goal, or the next level if none is set.",
+            position = 19
+    )
+    default int goalLevel()
+    {
+        return 0;
+    }
 }

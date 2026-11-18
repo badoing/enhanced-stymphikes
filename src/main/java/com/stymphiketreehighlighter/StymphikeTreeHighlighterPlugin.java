@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.Experience;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.HitsplatID;
@@ -37,6 +38,7 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.gameval.AnimationID;
 import net.runelite.api.gameval.NpcID;
 import net.runelite.api.gameval.ObjectID;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -45,6 +47,7 @@ import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.QuantityFormatter;
 import net.runelite.client.util.Text;
 
 /**
@@ -108,6 +111,9 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
 
     /** How long the hiding timer and dark screen last. */
     private static final long HIDE_DURATION_MS = 38_000;
+
+    /** Ticks after a spear to wait for its Hunter XP before measuring the cycle's XP. */
+    private static final int SPEAR_XP_WAIT_TICKS = 3;
 
     /** Game message shown once the bait is actually placed in the tree. */
     private static final String BAITED_MESSAGE = "you bait the tree";
@@ -228,6 +234,16 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     /** Last known Hunter XP, or -1 until the first reading after login. */
     private int lastHunterXp = -1;
 
+    /** Hunter XP when the current tree was baited, or -1 if no cycle is being measured. */
+    private int cycleStartXp = -1;
+
+    /** Tick the current cycle's Stymphike was speared on, or -1 if not waiting for its XP. */
+    private int cycleSpearTick = -1;
+
+    /** Hunter XP gained between baiting and spearing on the last measured cycle, or 0 if none yet. */
+    @Getter
+    private int xpPerSpear;
+
     @Provides
     StymphikeConfig provideConfig(ConfigManager configManager)
     {
@@ -267,7 +283,92 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
         spearCount = 0;
         xpGained = 0;
         statsStartMs = 0;
+        resetCycleXp();
+    }
+
+    private void resetCycleXp()
+    {
         lastHunterXp = -1;
+        cycleStartXp = -1;
+        cycleSpearTick = -1;
+        xpPerSpear = 0;
+    }
+
+    /**
+     * Hunter XP the Stymphikes-left count aims at. In order: the plugin's Goal Level, the in-game
+     * XP drops goal for Hunter, the next level, or max XP at 99.
+     */
+    public long getGoalXp()
+    {
+        int level = client.getRealSkillLevel(Skill.HUNTER);
+        long xp = client.getSkillExperience(Skill.HUNTER);
+
+        int configGoal = config.goalLevel();
+        if (configGoal > level)
+        {
+            return Experience.getXpForLevel(configGoal);
+        }
+
+        // Goal set in the in-game "Setup XP drops" tracker, if any and not yet reached
+        long gameGoal = client.getVarpValue(VarPlayerID.XPDROPS_HUNTER_END);
+        if (gameGoal > xp)
+        {
+            return gameGoal;
+        }
+
+        return level >= Experience.MAX_REAL_LEVEL
+                ? Experience.MAX_SKILL_XP
+                : Experience.getXpForLevel(level + 1);
+    }
+
+    /** Label for the goal: "lvl 99" when the goal is an exact level, otherwise the goal XP. */
+    public String getGoalLabel()
+    {
+        long goalXp = getGoalXp();
+        if (goalXp <= Experience.getXpForLevel(Experience.MAX_REAL_LEVEL))
+        {
+            int goalLevel = Experience.getLevelForXp((int) goalXp);
+            if (Experience.getXpForLevel(goalLevel) == goalXp)
+            {
+                return "lvl " + goalLevel;
+            }
+        }
+        return QuantityFormatter.quantityToStackSize(goalXp) + " xp";
+    }
+
+    /**
+     * Stymphikes left to spear to reach the goal, based on the XP of the last measured
+     * bait-to-spear cycle, or -1 if no cycle has been measured yet or the goal is already reached.
+     */
+    public int getSpearsToGoal()
+    {
+        if (xpPerSpear <= 0)
+        {
+            return -1;
+        }
+        long xp = client.getSkillExperience(Skill.HUNTER);
+        long remaining = getGoalXp() - xp;
+        if (remaining <= 0)
+        {
+            return -1;
+        }
+        return (int) ((remaining + xpPerSpear - 1) / xpPerSpear);
+    }
+
+    /** Records the XP gained from baiting to spearing for the cycle that has just finished. */
+    private void finishCycleXp()
+    {
+        if (cycleStartXp >= 0 && cycleSpearTick >= 0)
+        {
+            int gained = client.getSkillExperience(Skill.HUNTER) - cycleStartXp;
+            if (gained > 0)
+            {
+                xpPerSpear = gained;
+                log.debug("Stymphike cycle gave {} Hunter XP", gained);
+            }
+        }
+        cycleStartXp = -1;
+        cycleSpearTick = -1;
     }
 
     public boolean hasStatsSession()
@@ -347,7 +448,7 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
         {
             resetCycle();
             // Re-read the XP baseline after logging back in (could be a different account)
-            lastHunterXp = -1;
+            resetCycleXp();
         }
         else if (state == GameState.LOADING)
         {
@@ -408,6 +509,12 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
             // Only remember the tree; it counts as baited once the game confirms it (see onChatMessage)
             trees.put(wp, clicked);
             pendingBaitTree = wp;
+            // Measure this cycle's XP from the bait, finishing off the previous cycle first
+            if (cycleSpearTick >= 0)
+            {
+                finishCycleXp();
+            }
+            cycleStartXp = client.getSkillExperience(Skill.HUNTER);
             log.debug("Bait clicked on tree at {}", wp);
         }
         else if (hide)
@@ -463,6 +570,11 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
             log.debug("Stymphike speared");
             markStatsActivity();
             spearCount++;
+            if (cycleStartXp >= 0)
+            {
+                // The XP drop can land a tick or two after the thrust; measure once it has
+                cycleSpearTick = tickCount;
+            }
             completeCycle();
         }
     }
@@ -518,6 +630,11 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     public void onGameTick(GameTick event)
     {
         tickCount++;
+        if (cycleSpearTick >= 0 && tickCount - cycleSpearTick >= SPEAR_XP_WAIT_TICKS)
+        {
+            finishCycleXp();
+        }
+
         if (!hiding)
         {
             return;

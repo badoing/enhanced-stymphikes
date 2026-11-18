@@ -33,6 +33,8 @@ public class StymphikeStatsOverlay extends OverlayPanel
     private String spearedPerHourText = "0";
     private String xpGainedText = "0.00k";
     private String xpPerHourText = "0.00k";
+    private String goalLabel = "Left to lvl:";
+    private String spearsToGoalText = "-";
 
     @Inject
     public StymphikeStatsOverlay(StymphikeTreeHighlighterPlugin plugin, StymphikeConfig config)
@@ -71,12 +73,23 @@ public class StymphikeStatsOverlay extends OverlayPanel
             spearedPerHourText = QuantityFormatter.formatNumber(plugin.perHour(plugin.getSpearCount()));
             xpGainedText = formatThousands(plugin.getXpGained());
             xpPerHourText = formatThousands(plugin.perHour(plugin.getXpGained()));
+            if (config.showSpearsToGoal())
+            {
+                int spearsLeft = plugin.getSpearsToGoal();
+                goalLabel = "Left to " + plugin.getGoalLabel() + ":";
+                // Unknown until one full bait-to-spear cycle has been measured
+                spearsToGoalText = spearsLeft < 0 ? "-" : QuantityFormatter.formatNumber(spearsLeft);
+            }
         }
 
         addLine("Speared:", spearedText);
         addLine("Speared/hr:", spearedPerHourText);
         addLine("XP gained:", xpGainedText);
         addLine("XP/hr:", xpPerHourText);
+        if (config.showSpearsToGoal())
+        {
+            addLine(goalLabel, spearsToGoalText);
+        }
 
         return super.render(graphics);
     }
