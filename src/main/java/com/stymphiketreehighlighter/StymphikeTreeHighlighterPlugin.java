@@ -3,7 +3,7 @@ package com.stymphiketreehighlighter;
 import com.google.inject.Provides;
 import java.awt.event.KeyEvent;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
@@ -159,8 +159,8 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     @Getter
     private final Map<WorldPoint, GameObject> hideBushes = new HashMap<>();
 
-    /** Trees that are currently baited. */
-    private final Set<WorldPoint> baitedTrees = new HashSet<>();
+    /** Trees that are currently baited, oldest bait first. */
+    private final Set<WorldPoint> baitedTrees = new LinkedHashSet<>();
 
     /** Tree the player clicked Bait on, waiting for the game to confirm the bait is in. */
     private WorldPoint pendingBaitTree;
@@ -745,15 +745,53 @@ public class StymphikeTreeHighlighterPlugin extends Plugin implements KeyListene
     /** Stymphike speared (or gone): stop hiding, and the tree is unbaited again. */
     private void completeCycle()
     {
-        if (activeTree != null)
+        // With several trees baited, the Stymphike may not be at the most recently baited one:
+        // unbait the tree it actually landed at, then move the timer to a tree that is still baited
+        WorldPoint finished = findStymphikeTree();
+        if (finished != null)
         {
-            baitedTrees.remove(activeTree);
+            baitedTrees.remove(finished);
+        }
+        if (activeTree == null || !baitedTrees.contains(activeTree))
+        {
+            activeTree = baitedTrees.isEmpty() ? null : baitedTrees.iterator().next();
         }
         leftBush = false;
         stymphikeLanded = false;
         landedStymphike = null;
         reenteredBush = false;
         stopHiding();
+    }
+
+    /**
+     * The baited tree the current Stymphike is at: the one nearest the landed Stymphike, or the oldest
+     * baited tree if it wasn't seen landing (Stymphikes arrive in the order the trees were baited).
+     */
+    private WorldPoint findStymphikeTree()
+    {
+        if (baitedTrees.isEmpty())
+        {
+            return null;
+        }
+
+        WorldPoint npcLocation = landedStymphike != null ? landedStymphike.getWorldLocation() : null;
+        if (npcLocation == null)
+        {
+            return baitedTrees.iterator().next();
+        }
+
+        WorldPoint nearest = null;
+        int nearestDistance = Integer.MAX_VALUE;
+        for (WorldPoint tree : baitedTrees)
+        {
+            int distance = tree.distanceTo2D(npcLocation);
+            if (distance < nearestDistance)
+            {
+                nearest = tree;
+                nearestDistance = distance;
+            }
+        }
+        return nearest;
     }
 
     /** True while a Stymphike is on its way: hidden in the bush, or left it with the countdown still active. */
